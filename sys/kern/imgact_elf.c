@@ -267,6 +267,8 @@ __elfN(get_brandinfo)(struct image_params *imgp, const char *interp,
 		bi = elf_brand_list[i];
 		if (bi == NULL)
 			continue;
+		if (interp != NULL && (bi->flags & BI_BRAND_ONLY_STATIC) != 0)
+			continue;
 		if (hdr->e_machine == bi->machine && (bi->flags &
 		    (BI_BRAND_NOTE|BI_BRAND_NOTE_MANDATORY)) != 0) {
 			ret = __elfN(check_note)(imgp, bi->brand_note, osrel);
@@ -283,9 +285,11 @@ __elfN(get_brandinfo)(struct image_params *imgp, const char *interp,
 			 * this, we return first brand which accepted
 			 * our note and, optionally, header.
 			 */
-			if (ret && bi_m == NULL && (strlen(bi->interp_path) +
-			    1 != interp_name_len || strncmp(interp,
-			    bi->interp_path, interp_name_len) != 0)) {
+			if (ret && bi_m == NULL && interp != NULL &&
+			    (bi->interp_path == NULL ||
+			    (strlen(bi->interp_path) + 1 != interp_name_len ||
+			    strncmp(interp, bi->interp_path, interp_name_len)
+			    != 0))) {
 				bi_m = bi;
 				ret = 0;
 			}
@@ -299,12 +303,14 @@ __elfN(get_brandinfo)(struct image_params *imgp, const char *interp,
 	/* If the executable has a brand, search for it in the brand list. */
 	for (i = 0; i < MAX_BRANDS; i++) {
 		bi = elf_brand_list[i];
-		if (bi == NULL || bi->flags & BI_BRAND_NOTE_MANDATORY)
+		if (bi == NULL || (bi->flags & BI_BRAND_NOTE_MANDATORY) != 0 ||
+		    (interp != NULL && (bi->flags & BI_BRAND_ONLY_STATIC) != 0))
 			continue;
 		if (hdr->e_machine == bi->machine &&
 		    (hdr->e_ident[EI_OSABI] == bi->brand ||
+		    (bi->compat_3_brand != NULL &&
 		    strcmp((const char *)&hdr->e_ident[OLD_EI_BRAND],
-		    bi->compat_3_brand) == 0)) {
+		    bi->compat_3_brand) == 0))) {
 			/* Looks good, but give brand a chance to veto */
 			if (!bi->header_supported ||
 			    bi->header_supported(imgp)) {
@@ -312,7 +318,11 @@ __elfN(get_brandinfo)(struct image_params *imgp, const char *interp,
 				 * Again, prefer strictly matching
 				 * interpreter path.
 				 */
-				if (strlen(bi->interp_path) + 1 ==
+				if (interp_name_len == 0 &&
+				    bi->interp_path == NULL)
+					return (bi);
+				if (bi->interp_path != NULL &&
+				    strlen(bi->interp_path) + 1 ==
 				    interp_name_len && strncmp(interp,
 				    bi->interp_path, interp_name_len) == 0)
 					return (bi);
@@ -341,9 +351,12 @@ __elfN(get_brandinfo)(struct image_params *imgp, const char *interp,
 	if (interp != NULL) {
 		for (i = 0; i < MAX_BRANDS; i++) {
 			bi = elf_brand_list[i];
-			if (bi == NULL || bi->flags & BI_BRAND_NOTE_MANDATORY)
+			if (bi == NULL || (bi->flags &
+			    (BI_BRAND_NOTE_MANDATORY | BI_BRAND_ONLY_STATIC))
+			    != 0)
 				continue;
 			if (hdr->e_machine == bi->machine &&
+			    bi->interp_path != NULL &&
 			    /* ELF image p_filesz includes terminating zero */
 			    strlen(bi->interp_path) + 1 == interp_name_len &&
 			    strncmp(interp, bi->interp_path, interp_name_len)
@@ -355,7 +368,8 @@ __elfN(get_brandinfo)(struct image_params *imgp, const char *interp,
 	/* Lacking a recognized interpreter, try the default brand */
 	for (i = 0; i < MAX_BRANDS; i++) {
 		bi = elf_brand_list[i];
-		if (bi == NULL || bi->flags & BI_BRAND_NOTE_MANDATORY)
+		if (bi == NULL || (bi->flags & BI_BRAND_NOTE_MANDATORY) != 0 ||
+		    (interp != NULL && (bi->flags & BI_BRAND_ONLY_STATIC) != 0))
 			continue;
 		if (hdr->e_machine == bi->machine &&
 		    __elfN(fallback_brand) == bi->brand)
@@ -578,7 +592,7 @@ __elfN(load_section)(struct image_params *imgp, vm_ooffset_t offset,
 	/* This had damn well better be true! */
 	if (map_len != 0) {
 		rv = __elfN(map_insert)(imgp, map, NULL, 0, map_addr,
-		    map_addr + map_len, VM_PROT_ALL, VM_PROT_ALL, 0);
+		    map_addr + map_len, prot, VM_PROT_ALL, 0);
 		if (rv != KERN_SUCCESS)
 			return (EINVAL);
 	}
@@ -599,10 +613,12 @@ __elfN(load_section)(struct image_params *imgp, vm_ooffset_t offset,
 	}
 
 	/*
-	 * set it to the specified protection.
+	 * Remove write access to the page if it was only granted by map_insert
+	 * to allow copyout.
 	 */
-	vm_map_protect(map, trunc_page(map_addr), round_page(map_addr +
-	    map_len), prot, FALSE);
+	if ((prot & VM_PROT_WRITE) == 0)
+		vm_map_protect(map, trunc_page(map_addr), round_page(map_addr +
+		    map_len), prot, FALSE);
 
 	return (0);
 }
@@ -863,24 +879,6 @@ __CONCAT(exec_, __elfN(imgact))(struct image_params *imgp)
 		error = ENOEXEC;
 		goto ret;
 	}
-	et_dyn_addr = 0;
-	if (hdr->e_type == ET_DYN) {
-		if ((brand_info->flags & BI_CAN_EXEC_DYN) == 0) {
-			uprintf("Cannot execute shared object\n");
-			error = ENOEXEC;
-			goto ret;
-		}
-		/*
-		 * Honour the base load address from the dso if it is
-		 * non-zero for some reason.
-		 */
-		if (baddr == 0) {
-			et_dyn_addr = ET_DYN_LOAD_ADDR;
-#ifdef PAX_ASLR
-			pax_aslr_execbase(imgp->proc, &et_dyn_addr);
-#endif
-		}
-	}
 	sv = brand_info->sysvec;
 	if (interp != NULL && brand_info->interp_newpath != NULL)
 		newinterp = brand_info->interp_newpath;
@@ -900,6 +898,25 @@ __CONCAT(exec_, __elfN(imgact))(struct image_params *imgp)
 
 	error = exec_new_vmspace(imgp, sv);
 	imgp->proc->p_sysent = sv;
+
+	et_dyn_addr = 0;
+	if (hdr->e_type == ET_DYN) {
+		if ((brand_info->flags & BI_CAN_EXEC_DYN) == 0) {
+			uprintf("Cannot execute shared object\n");
+			error = ENOEXEC;
+			goto ret;
+		}
+		/*
+		 * Honour the base load address from the dso if it is
+		 * non-zero for some reason.
+		 */
+		if (baddr == 0) {
+			et_dyn_addr = ET_DYN_LOAD_ADDR;
+#ifdef PAX_ASLR
+			pax_aslr_execbase(imgp->proc, &et_dyn_addr);
+#endif
+		}
+	}
 
 	vn_lock(imgp->vp, LK_EXCLUSIVE | LK_RETRY);
 	if (error != 0)

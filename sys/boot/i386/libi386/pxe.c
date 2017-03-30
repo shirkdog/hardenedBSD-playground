@@ -342,7 +342,7 @@ pxe_open(struct open_file *f, ...)
 			}
 			if (intf_mtu != 0) {
 				char mtu[16];
-				sprintf(mtu, "%u", intf_mtu);
+				snprintf(sizeof(mtu), mtu, "%u", intf_mtu);
 				setenv("boot.netif.mtu", mtu, 1);
 			}
 			printf("pxe_open: server addr: %s\n", inet_ntoa(rootip));
@@ -621,13 +621,6 @@ bangpxe_call(int func)
 	v86.ctl  = V86_FLAGS;
 }
 
-time_t
-getsecs(void)
-{
-	time_t n = 0;
-	time(&n);
-	return n;
-}
 
 static int
 pxe_netif_match(struct netif *nif, void *machdep_hint)
