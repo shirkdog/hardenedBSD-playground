@@ -88,16 +88,18 @@ PICFLAG=-fpic
 .endif
 .endif
 
-.if defined(MK_PIE)
+.if defined(MK_PIE) && !defined(NOPIE)
 # Ports will not have MK_PIE defined and the following logic requires
 # it be defined.
-
-.if !defined(NO_PIC)
 .if ${MK_PIE} != "no"
-.if !defined(NOPIE)
 CFLAGS+= ${PICFLAG}
 .endif
 .endif
+
+.if !defined(NOCFI)
+.if defined(MK_CROSS_DSO_CFI) && ${MK_CROSS_DSO_CFI} != "no"
+CFLAGS+=	-flto
+CXXFLAGS+=	-flto
 .endif
 .endif
 

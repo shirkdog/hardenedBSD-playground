@@ -3973,7 +3973,7 @@ ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
   if ((ROPI || RWPI) && (PIC || PIE))
     ToolChain.getDriver().Diag(diag::err_drv_ropi_rwpi_incompatible_with_pic);
 
-  if (PIC)
+//  if (PIC)
     return std::make_tuple(llvm::Reloc::PIC_, IsPICLevelTwo ? 2U : 1U, PIE);
 
   llvm::Reloc::Model RelocM = llvm::Reloc::Static;
